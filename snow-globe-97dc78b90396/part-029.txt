@@ -1,0 +1,399 @@
+(toastTimer);toastTimer=setTimeout(()=>{$('toast').hidden=true;},5000);}
+function requestRender(){dirty=true;if(!raf&&!document.hidden&&!lost)raf=requestAnimationFrame(frame);}
+function setStatus(message){$('renderStatus').textContent=message;}
+function updateRoomLight(){
+ const light=roomLighting.sample({outsideYaw:state.outsideYaw,insideYaw:state.insideYaw,yaw:state.yaw,amount:state.lightSpill,enabled:state.linkedLighting});
+ // A perceptual response makes dim, warm room sources visible without washing out the village.
+ roomLight={color:light.color,direction:light.direction,strength:Math.sqrt(C.clamp(light.strength,0,1))};
+}
+function syncMotionUI(){
+ $('motionToggle').disabled=!ready&&!state.motionEnabled;
+ $('motionToggle').setAttribute('aria-pressed',state.motionEnabled);
+ setLabel('motionToggle',state.motionEnabled?(state.motionStatus==='requesting'?'Cancel phone motion':'Disable phone motion'):'Enable phone motion');
+ $('motionRecenter').disabled=!ready||!state.motionEnabled;
+ $('motionStatus').textContent=motionMessage+(state.motionEnabled&&state.paused?' Resume motion to stir the snow.':'');
+ canvas.dataset.motionShake=String(!!motionInfo.shake);canvas.dataset.motionTilt=String(!!motionInfo.tilt);canvas.dataset.motionTiltSource=motionInfo.tiltSource||'';
+}
+motion=window.createGlobeMotion({
+ onTilt:tilt=>{if(!ready||!state.motionEnabled||state.paused||document.hidden)return;state.tiltX=C.clamp(tilt.x,-1,1);state.tiltY=C.clamp(tilt.y,-1,1);requestRender();},
+ onShake:strength=>{if(!ready||!state.motionEnabled||state.paused||document.hidden)return;state.shake=Math.min(1,state.shake+strength);if(state.snow===0){state.snow=.78;$('snowAmount').value=78;$('snowValue').textContent='78%';}requestRender();},
+ onStatus:status=>{motionInfo=status;state.motionEnabled=!!status.enabled;state.motionStatus=status.status;motionMessage=status.message;if(!status.enabled){state.tiltX=0;state.tiltY=0;requestRender();}syncMotionUI();}
+});
+let music=null,musicState=null,musicExporting=false,musicExportURL=null,musicExportGeneration=0;
+function syncMusicUI(info){
+ musicState=info;
+ $('musicName').textContent=info.name||(info.loading?info.pendingName:'No music selected');
+ $('musicStatus').textContent=info.message;
+ $('musicPlay').disabled=!info.hasTrack;
+ $('musicPlay').setAttribute('aria-pressed',!!info.playing);
+ setLabel('musicPlay',info.playing||info.status==='starting'?'Pause music':'Play music');
+ $('musicRemove').disabled=!info.hasTrack&&!info.loading;
+ $('musicSave').disabled=!info.hasTrack||musicExporting;
+ $('musicVolume').value=Math.round(info.volume*100);$('musicVolumeValue').textContent=Math.round(info.volume*100)+'%';
+ for(const [key,value] of Object.entries({musicStatus:info.status,musicName:info.name,musicPlaying:!!info.playing,musicHasTrack:!!info.hasTrack,musicVolume:info.volume}))canvas.dataset[key]=String(value);
+}
+try{music=window.createGlobeMusic({element:$('musicAudio'),onStatus:syncMusicUI});syncMusicUI(music.getState());}
+catch{$('musicChoose').disabled=true;$('musicStatus').textContent='Audio playback is unavailable in this browser. You can still explore the panorama.';}
+function audioDataURL(file){return new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(reader.result);reader.onerror=()=>reject(new Error('This music file could not be read.'));reader.readAsDataURL(file);});}
+function clearExportDownload(invalidate=true){
+ if(invalidate){musicExportGeneration++;musicExporting=false;}
+ if(musicExportURL){URL.revokeObjectURL(musicExportURL);musicExportURL=null;}
+ $('musicDownload').hidden=true;$('musicDownload').removeAttribute('href');
+ if(invalidate&&music)syncMusicUI(music.getState());
+}
+async function saveWithMusic(){
+ const file=music?.getFile();if(!file||musicExporting)return;const request=++musicExportGeneration;musicExporting=true;syncMusicUI(music.getState());
+ try{
+  const src=await audioDataURL(file);if(request!==musicExportGeneration)return;const copy=document.documentElement.cloneNode(true);
+  copy.classList.remove('pseudo-full');
+  const preview=copy.querySelector('#world'),panel=copy.querySelector('#settingsPanel');
+  preview.classList.remove('cinema','full-active');panel.classList.remove('open');
+  if(panel.parentNode===preview)preview.parentNode.insertBefore(panel,preview);
+  copy.querySelectorAll('#world canvas:not(#panorama)').forEach(element=>element.remove());
+  copy.querySelector('#musicAudio').removeAttribute('src');
+  copy.querySelector('#musicDownload').hidden=true;copy.querySelector('#musicDownload').removeAttribute('href');
+  copy.querySelector('#music-data').textContent=JSON.stringify({name:file.name||'Background music',type:file.type||'',src}).replace(/</g,'\\u003c');
+  copy.querySelector('#loading').hidden=false;copy.querySelector('#helpPanel').hidden=true;copy.querySelector('#toast').hidden=true;copy.querySelector('#showControls').hidden=true;
+  copy.querySelector('#musicSave').disabled=false;
+  if(projectCodec){const project=await captureProject({file,src});if(request!==musicExportGeneration)return;writeProjectCopy(copy,project);}
+  const blob=new Blob(['<!doctype html>\n'+copy.outerHTML],{type:'text/html;charset=utf-8'});if(projectCodec&&blob.size>100*1024*1024)throw new Error('This complete HTML exceeds 100 MB. Choose smaller images or a shorter music file.');const url=URL.createObjectURL(blob);
+  clearExportDownload(false);musicExportURL=url;
+  const link=$('musicDownload');link.href=url;link.download='Snow_Globe_With_Music.html';link.hidden=false;
+  toast('Your copy is ready. Choose Download HTML with music.');
+ }catch(error){if(request===musicExportGeneration)toast(error.message||'The HTML could not be saved. Try a smaller music file.');}
+ finally{if(request===musicExportGeneration){musicExporting=false;if(music)syncMusicUI(music.getState());}}
+}
+if(music){
+ $('musicChoose').onclick=()=>$('musicFile').click();
+ $('musicFile').onchange=e=>{const file=e.target.files[0];e.target.value='';if(projectCommitting)return false;if(file){sceneRevision++;return music.loadFile(file).then(accepted=>{if(accepted){clearExportDownload();clearProjectFiles();}return accepted;});}};
+ $('musicPlay').onclick=()=>music.toggle();$('musicRemove').onclick=()=>{if(projectCommitting)return;sceneRevision++;music.clear();clearExportDownload();clearProjectFiles();};
+ $('musicVolume').oninput=e=>music.setVolume(+e.target.value/100);$('musicSave').onclick=saveWithMusic;
+ try{const embedded=JSON.parse($('music-data').textContent||'null');if(embedded&&typeof embedded.src==='string'&&/^data:[^,]*;base64,/i.test(embedded.src)){
+  const comma=embedded.src.indexOf(','),header=embedded.src.slice(0,comma),raw=atob(embedded.src.slice(comma+1)),bytes=new Uint8Array(raw.length);
+  for(let i=0;i<raw.length;i++)bytes[i]=raw.charCodeAt(i);
+  const file=new Blob([bytes],{type:embedded.type||header.slice(5).split(';')[0]});Object.defineProperty(file,'name',{value:embedded.name||'Background music'});music.loadFile(file);
+ }}catch{$('musicStatus').textContent='The embedded music could not be opened. Choose another music file.';}
+}
+if($('musicExample')){
+ try{const example=window.GlobeExampleMusic?.read(document);$('musicExample').disabled=!music||!example;
+  $('musicExample').onclick=async()=>{if(projectCommitting)return false;sceneRevision++;try{const file=window.GlobeExampleMusic.toFile(example),accepted=await music.loadFile(file);if(accepted){clearExportDownload();clearProjectFiles();toast('Silent Night is ready. Press Play music to listen.');}return accepted;}catch(error){toast(error.message||'The example music could not be opened.');}};
+ }catch{$('musicExample').disabled=true;}
+}
+function params(){const aspect=canvas.width/canvas.height,view=state.mode==='outside'?window.GlobeView.project({yaw:state.yaw,pitch:state.pitch,fov:state.fov,aspect,outsideYaw:state.outsideYaw}):{globe:{x:.5,y:.49,r:Math.min(.34,aspect*.44),visible:true},roomAnchor:null};return {...view,aspect,insideProjection:mapping(images.inside).equi?{x:.83,y:.78}:{x:.58,y:.48}};}
+function syncUI(force){
+ const angle=n=>Math.round(C.wrap(n)/DEG)%360;
+ if(force||document.activeElement!==$('insideAngle'))$('insideAngle').value=angle(state.insideYaw);
+ if(force||document.activeElement!==$('outsideAngle'))$('outsideAngle').value=angle(state.outsideYaw);
+ $('insideValue').textContent=angle(state.insideYaw)+'°';$('outsideValue').textContent=angle(state.outsideYaw)+'°';
+ $('insideView').setAttribute('aria-pressed',state.mode==='inside');$('outsideView').setAttribute('aria-pressed',state.mode==='outside');
+ setLabel('modeToggle',state.mode==='inside'?'See the whole globe':'Enter the globe');
+ $('sceneEyebrow').textContent=state.mode==='inside'?'WITHIN THE GLASS':'A WORLD WITHIN A WORLD';
+ $('sceneTitle').textContent=state.mode==='inside'?'The winter village':'The snow globe';
+ $('sceneStatus').textContent=state.mode==='inside'?'A separate room, beyond the glass.':'A little winter, held in glass.';
+ $('captionText').textContent=state.mode==='inside'?'A quiet place, inside a little world.':'A whole little world. Yours to enter.';
+ $('autoOutside').setAttribute('aria-pressed',state.autoOutside);$('autoLabel').textContent=state.autoOutside?'ON':'OFF';
+ for(const [id,key,label] of [['syncRotation','syncRotation','syncLabel'],['autoInside','autoInside','autoInsideLabel'],['autoSnow','autoSnow','autoSnowLabel'],['linkedLighting','linkedLighting','linkedLabel']]){$(id).setAttribute('aria-pressed',state[key]);$(label).textContent=state[key]?'ON':'OFF';}
+ $('viewHint').textContent=state.mode==='inside'?'Drag to look around. Pinch or scroll to zoom.':'Drag to explore the room, including up and down. The globe stays on the table; Find the globe brings it back.';
+ canvas.setAttribute('aria-label',state.mode==='inside'?'Snow-globe panorama. Drag to look around, arrow keys to turn, plus or minus to zoom, Home to reset.':'Room panorama with a snow globe anchored on the table. Drag or use arrows to look around, plus or minus to zoom, Home to find the globe.');
+ world.querySelector?.('.instruction')?.replaceChildren(document.createTextNode('DRAG TO LOOK · SCROLL TO ZOOM'));
+ setLabel('reset',state.mode==='outside'?'Find the globe':'Reset view');
+ $('pauseMotion').setAttribute('aria-pressed',state.paused);setLabel('pauseMotion',state.paused?'Resume motion':'Pause motion');
+ $('viewMeta').textContent=angle(state.yaw)+'° · '+Math.round(state.fov)+'° VIEW';
+ canvas.dataset.mode=state.mode;canvas.dataset.insideYaw=state.insideYaw.toFixed(5);canvas.dataset.outsideYaw=state.outsideYaw.toFixed(5);canvas.dataset.glassYaw='0';canvas.dataset.paused=String(state.paused);canvas.dataset.renderedFrames=String(frameCount);canvas.dataset.animationTime=state.time.toFixed(3);canvas.dataset.renderMs=lastRenderMs.toFixed(2);canvas.dataset.pitch=String(state.pitch);canvas.dataset.fov=String(state.fov);
+ for(const key of ['yaw','snowYaw','tiltX','tiltY','motionEnabled','motionStatus','autoInside','autoOutside','syncRotation','autoSnow','snow','snowVisibility','linkedLighting','lightSpill'])canvas.dataset[key]=String(state[key]);
+ const projected=params().globe;for(const key of ['x','y','r','visible'])canvas.dataset['globe'+key[0].toUpperCase()+key.slice(1)]=String(projected[key]);
+ canvas.dataset.effectiveSnow=String(C.effectiveSnow(state));canvas.dataset.roomLightStrength=String(roomLight.strength);
+ motion?.setPaused(!ready||lost||state.paused||document.hidden);syncMotionUI();
+}
+function setMode(mode){if(mode!=='inside'&&mode!=='outside')return;state.mode=mode;state.yaw=mode==='outside'?C.wrap(-state.outsideYaw):0;state.pitch=defaultPitch(mode);state.fov=defaultFov(mode);syncUI(true);requestRender();}
+function setSettings(open){settings.classList.toggle('open',open);$('settingsToggle').setAttribute('aria-expanded',open);if(open){$('closeSettings').focus({preventScroll:true});}else if(mobile()||isFull())$('settingsToggle').focus({preventScroll:true});}
+function setHelp(open){$('helpPanel').hidden=!open;$('help').setAttribute('aria-expanded',open);if(open)$('closeHelp').focus({preventScroll:true});else $('help').focus({preventScroll:true});}
+function isFull(){return !!document.fullscreenElement||document.documentElement.classList.contains('pseudo-full');}
+function syncFull(){
+ const full=isFull();setLabel('fullscreen',full?'Exit fullscreen':'Fullscreen');world.classList.toggle('full-active',full);
+ if(full&&settings.parentNode!==world){world.appendChild(settings);}else if(!full&&settings.parentNode===world){settingsHome.insertBefore(settings,settingsNext);}
+ if(!full)setSettings(false);resize();
+}
+async function toggleFullscreen(){
+ try{if(document.fullscreenElement){await document.exitFullscreen();}else if(document.documentElement.classList.contains('pseudo-full'))document.documentElement.classList.remove('pseudo-full');else if(world.requestFullscreen){await world.requestFullscreen();}else document.documentElement.classList.add('pseudo-full');}
+ catch{document.documentElement.classList.toggle('pseudo-full');}syncFull();
+}
+function resize(){const r=world.getBoundingClientRect();if(!r.width||!r.height)return;const size=C.bufferSize(r.width,r.height,devicePixelRatio||1,state.quality);if(canvas.width!==size.width||canvas.height!==size.height){canvas.width=size.width;canvas.height=size.height;}if(compatCanvas&&(compatCanvas.width!==canvas.width||compatCanvas.height!==canvas.height)){compatCanvas.width=canvas.width;compatCanvas.height=canvas.height;}if(gl)gl.viewport(0,0,canvas.width,canvas.height);requestRender();}
+function compile(type,source){const shader=gl.createShader(type);gl.shaderSource(shader,source);gl.compileShader(shader);if(!gl.getShaderParameter(shader,gl.COMPILE_STATUS)){const message=gl.getShaderInfoLog(shader);gl.deleteShader(shader);throw new Error(message);}return shader;}
+function createTextureForImage(image){
+ const max=Math.min(4096,gl.getParameter(gl.MAX_TEXTURE_SIZE));let source=image;
+ if(image.width>max||image.height>max){const temp=document.createElement('canvas'),scale=max/Math.max(image.width,image.height);temp.width=Math.max(1,Math.floor(image.width*scale));temp.height=Math.max(1,Math.floor(image.height*scale));temp.getContext('2d').drawImage(image,0,0,temp.width,temp.height);source=temp;}
+ const tex=gl.createTexture();gl.bindTexture(gl.TEXTURE_2D,tex);gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL,false);gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL,false);
+ gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
+ gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,source);
+ const err=gl.getError();if(err!==gl.NO_ERROR){gl.deleteTexture(tex);throw new Error('This image could not fit in graphics memory. Try a smaller panorama.');}
+ return tex;
+}
+function uploadTexture(name,image){
+ const tex=createTextureForImage(image);if(textures[name])gl.deleteTexture(textures[name]);textures[name]=tex;
+}
+function setupGL(){
+ gl=canvas.getContext('webgl',{alpha:false,antialias:false,depth:false,stencil:false,preserveDrawingBuffer:false,powerPreference:'low-power'})||canvas.getContext('experimental-webgl',{alpha:false,antialias:false,depth:false});
+ if(!gl)throw new Error('WebGL unavailable');
+ let fragment=$('panorama-fragment').textContent;
+ if(!gl.getShaderPrecisionFormat(gl.FRAGMENT_SHADER,gl.HIGH_FLOAT).precision)fragment=fragment.replace('precision highp float;','precision mediump float;');
+ const vertex=compile(gl.VERTEX_SHADER,'attribute vec2 aPosition;varying vec2 vUv;void main(){vUv=aPosition*.5+.5;gl_Position=vec4(aPosition,0.,1.);}'),frag=compile(gl.FRAGMENT_SHADER,fragment);
+ program=gl.createProgram();gl.attachShader(program,vertex);gl.attachShader(program,frag);gl.bindAttribLocation(program,0,'aPosition');gl.linkProgram(program);gl.deleteShader(vertex);gl.deleteShader(frag);
+ if(!gl.getProgramParameter(program,gl.LINK_STATUS))throw new Error(gl.getProgramInfoLog(program));
+ quad=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,quad);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,1,-1,-1,1,1,1]),gl.STATIC_DRAW);
+ for(const name of ['uInside','uOutside','uGlass','uSpan','uEqui','uAngles','uLook','uGlobe','uRoomAnchor','uAspect','uFov','uMode','uGlassAmount','uRoomAmount','uInsideKey','uInsideAlpha','uInsideProjection','uTime','uRoomLightColor','uRoomLightDirection','uRoomLightStrength'])uniforms[name]=gl.getUniformLocation(program,name);
+ for(const name of ['inside','outside','glass'])uploadTexture(name,images[name]);
+ snow=window.createSnowSystem(gl);canvas.dataset.renderer='webgl';setStatus('LIVE SNOW · WEBGL');
+}
+function mapping(image){if(!image)return{equi:0,span:Math.PI};const ratio=image.width/image.height;return{equi:ratio>=1.8&&ratio<=2.2?1:0,span:ratio>=1.8&&ratio<=2.2?Math.PI:C.TAU/ratio};}
+function constrainView(){const limit=(mapping(images[state.mode==='outside'?'outside':'inside']).equi?84:24)*DEG;state.pitch=C.clamp(state.pitch,-limit,limit);}
+function drawGL(dt){
+ const {aspect,globe,insideProjection,roomAnchor}=params(),a=mapping(images.inside),b=mapping(images.outside);
+ gl.disable(gl.BLEND);gl.disable(gl.DEPTH_TEST);gl.disable(gl.SCISSOR_TEST);gl.useProgram(program);gl.bindBuffer(gl.ARRAY_BUFFER,quad);gl.enableVertexAttribArray(0);gl.vertexAttribPointer(0,2,gl.FLOAT,false,0,0);gl.disableVertexAttribArray(1);
+ ['inside','outside','glass'].forEach((name,i)=>{gl.activeTexture(gl.TEXTURE0+i);gl.bindTexture(gl.TEXTURE_2D,textures[name]);});
+ gl.uniform1i(uniforms.uInside,0);gl.uniform1i(uniforms.uOutside,1);gl.uniform1i(uniforms.uGlass,2);
+ gl.uniform2f(uniforms.uSpan,a.span,b.span);gl.uniform2f(uniforms.uEqui,a.equi,b.equi);gl.uniform2f(uniforms.uAngles,state.insideYaw,state.outsideYaw);gl.uniform2f(uniforms.uLook,state.yaw,state.pitch);
+ gl.uniform3f(uniforms.uGlobe,globe.x,globe.y,globe.r);gl.uniform1f(uniforms.uAspect,aspect);gl.uniform1f(uniforms.uFov,state.fov*DEG);gl.uniform1f(uniforms.uMode,state.mode==='inside'?0:1);gl.uniform1f(uniforms.uGlassAmount,state.glass);gl.uniform1f(uniforms.uRoomAmount,state.room);gl.uniform1f(uniforms.uInsideKey,insideOriginal?1:0);gl.uniform1f(uniforms.uInsideAlpha,insideHasAlpha?1:0);gl.uniform2f(uniforms.uInsideProjection,insideProjection.x,insideProjection.y);gl.uniform1f(uniforms.uTime,state.time);
+ gl.uniform3f(uniforms.uRoomLightColor,...roomLight.color);gl.uniform3f(uniforms.uRoomLightDirection,...roomLight.direction);gl.uniform1f(uniforms.uRoomLightStrength,roomLight.strength);
+ gl.uniform4f(uniforms.uRoomAnchor,...(roomAnchor?[...roomAnchor,1]:[0,0,0,0]));
+ gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
+ if(snow&&state.snow>0)snow.draw({time:state.time,dt:state.paused?0:dt,yaw:state.yaw,pitch:state.pitch,outsideYaw:state.outsideYaw,snowYaw:state.snowYaw,visibility:state.snowVisibility,fov:state.fov*DEG,aspect,width:canvas.width,height:canvas.height,density:C.effectiveSnow(state),strength:.95,mode:state.mode,shake:state.shake,tilt:{x:state.tiltX,y:state.tiltY},roomLight,roomAnchor,globe,insideProjection});
+}
+function frame(t){
+ raf=0;if(document.hidden||lost)return;
+ const running=ready&&!state.paused&&(C.isAutoRotating(state)||state.snow>0||state.shake>0),smoothLinked=state.mode==='inside'&&state.syncRotation&&state.autoOutside,interval=1000/(state.quality==='battery'?24:gl||smoothLinked?60:30);
+ if(!last)nextFrameAt=t;
+ // Keep the fractional deadline instead of discarding it on every rendered
+ // frame. A 60 Hz display can then deliver 60/30/24 Hz without uneven skips.
+ if(last&&t+.5<nextFrameAt&&!dirty){if(running)raf=requestAnimationFrame(frame);return;}
+ const dt=last?Math.min(.075,(t-last)/1000):0;last=t;
+ if(t+.5>=nextFrameAt)nextFrameAt+=interval*Math.max(1,Math.floor((t-nextFrameAt+.5)/interval)+1);
+ if(ready&&(dirty||running)){C.advance(state,dt);updateRoomLight();const renderBegan=typeof performance!=='undefined'?performance.now():Date.now();try{if(gl)drawGL(dt);else if(compatibility)compatibility.draw();}catch(e){console.error('Rendering failed',e);setStatus('DISPLAY ERROR');toast('The display needs a refresh. Your image files are unchanged.');state.paused=true;motion?.setPaused(true);}lastRenderMs=(typeof performance!=='undefined'?performance.now():Date.now())-renderBegan;dirty=false;frameCount++;}
+ if(t-lastUI>250){syncUI();lastUI=t;}
+ if(running)raf=requestAnimationFrame(frame);
+}
+function resetCamera(){state.yaw=state.mode==='outside'?C.wrap(-state.outsideYaw):0;state.pitch=defaultPitch(state.mode);state.fov=defaultFov(state.mode);syncUI();requestRender();}
+function look(dx,dy){state.yaw=C.wrap(state.yaw+dx);state.pitch+=dy;constrainView();syncUI();requestRender();}
+function zoom(amount){state.fov=C.clamp(state.fov+amount,24,mapping(images[state.mode==='outside'?'outside':'inside']).equi?110:100);syncUI();requestRender();}
+const pointers=new Map();let previous=null,pinchDistance=0;
+canvas.addEventListener('pointerdown',e=>{canvas.focus({preventScroll:true});canvas.setPointerCapture(e.pointerId);pointers.set(e.pointerId,{x:e.clientX,y:e.clientY});previous={x:e.clientX,y:e.clientY};if(pointers.size===2){const [a,b]=[...pointers.values()];pinchDistance=Math.hypot(a.x-b.x,a.y-b.y);}e.preventDefault();});
+canvas.addEventListener('pointermove',e=>{if(!pointers.has(e.pointerId))return;pointers.set(e.pointerId,{x:e.clientX,y:e.clientY});if(pointers.size===2){const [a,b]=[...pointers.values()],d=Math.hypot(a.x-b.x,a.y-b.y);if(pinchDistance)zoom(state.fov*(pinchDistance/Math.max(d,1)-1));pinchDistance=d;}else if(pointers.size===1&&previous){const sensitivity=state.fov*DEG/Math.max(180,canvas.clientHeight);look(-(e.clientX-previous.x)*sensitivity,(e.clientY-previous.y)*sensitivity);previous={x:e.clientX,y:e.clientY};}});
+function release(e){pointers.delete(e.pointerId);previous=pointers.size===1?[...pointers.values()][0]:null;pinchDistance=0;}
+['pointerup','pointercancel','lostpointercapture'].forEach(name=>canvas.addEventListener(name,release));
+canvas.addEventListener('wheel',e=>{e.preventDefault();zoom(Math.sign(e.deltaY)*3);},{passive:false});
+canvas.addEventListener('keydown',e=>{const actions={ArrowLeft:()=>look(-4*DEG,0),ArrowRight:()=>look(4*DEG,0),ArrowUp:()=>look(0,4*DEG),ArrowDown:()=>look(0,-4*DEG),'+':()=>zoom(-4),'=':()=>zoom(-4),'-':()=>zoom(4),Home:resetCamera};if(actions[e.key]){e.preventDefault();actions[e.key]();}});
+$('insideView').onclick=()=>setMode('inside');$('outsideView').onclick=()=>setMode('outside');$('modeToggle').onclick=()=>setMode(state.mode==='inside'?'outside':'inside');
+$('autoOutside').onclick=()=>{state.autoOutside=!state.autoOutside;C.resetRotation(state);syncUI();requestRender();};
+ $('syncRotation').onclick=()=>{state.syncRotation=!state.syncRotation;if(state.syncRotation){state.autoOutside=true;C.resetRotation(state);}syncUI();requestRender();};
+ for(const id of ['autoInside','autoSnow','linkedLighting'])$(id).onclick=()=>{state[id]=!state[id];if(id==='autoInside')C.resetRotation(state);syncUI();requestRender();};
+ $('motionToggle').onclick=()=>{if(state.motionEnabled||state.motionStatus==='requesting'){motion.disable();state.tiltX=0;state.tiltY=0;syncMotionUI();requestRender();return;}if(!ready)return;motion.setPaused(state.paused||document.hidden);return motion.enable();};
+ $('motionRecenter').onclick=()=>{motion.recenter();state.tiltX=0;state.tiltY=0;requestRender();};
+$('pauseMotion').onclick=()=>{state.paused=!state.paused;last=0;syncUI();requestRender();};
+$('shake').onclick=()=>{state.shake=1;state.paused=false;if(state.snow<.12){state.snow=.78;$('snowAmount').value=78;$('snowValue').textContent='78%';}syncUI();requestRender();toast('The snow is swirling.');};
+for(const [id,layer] of [['insideAngle','inside'],['outsideAngle','outside']])$(id).oninput=e=>{const previousAngle=state.insideYaw;C.setAngle(state,layer,e.target.value);if(layer==='outside')state.autoOutside=false;else{state.snowYaw=C.wrap(state.snowYaw+state.insideYaw-previousAngle);if(state.mode==='outside')state.autoInside=false;}syncUI();requestRender();};
+$('speed').oninput=e=>{state.speed=+e.target.value;$('speedValue').textContent=state.speed.toFixed(1)+'°/s';requestRender();};
+for(const [id,key,out] of [['snowAmount','snow','snowValue'],['snowVisibility','snowVisibility','visibilityValue'],['glassAmount','glass','glassValue'],['roomAmount','room','roomValue'],['lightSpill','lightSpill','lightValue']])$(id).oninput=e=>{state[key]=+e.target.value/100;$(out).textContent=e.target.value+'%';requestRender();};
+$('quality').onchange=e=>{state.quality=e.target.value;resize();};$('reset').onclick=resetCamera;$('zoomIn').onclick=()=>zoom(-5);$('zoomOut').onclick=()=>zoom(5);
+$('fullscreen').onclick=toggleFullscreen;document.addEventListener('fullscreenchange',syncFull);
+$('settingsToggle').onclick=()=>setSettings(!settings.classList.contains('open'));$('closeSettings').onclick=()=>setSettings(false);
+$('help').onclick=()=>setHelp($('helpPanel').hidden);$('closeHelp').onclick=()=>setHelp(false);
+function cinema(on){world.classList.toggle('cinema',on);$('showControls').hidden=!on;$('cinema').setAttribute('aria-pressed',on);if(on){setSettings(false);$('helpPanel').hidden=true;$('help').setAttribute('aria-expanded','false');$('showControls').focus({preventScroll:true});}else $('cinema').focus({preventScroll:true});}
+$('cinema').onclick=()=>cinema(true);$('showControls').onclick=()=>cinema(false);
+document.addEventListener('keydown',e=>{if(e.key!=='Escape')return;if(world.classList.contains('cinema'))cinema(false);else if(settings.classList.contains('open'))setSettings(false);else if(!$('helpPanel').hidden)setHelp(false);else if(document.documentElement.classList.contains('pseudo-full')){document.documentElement.classList.remove('pseudo-full');syncFull();}});
+function loadImage(src){return new Promise((resolve,reject)=>{const img=new Image();img.onload=()=>resolve(img);img.onerror=()=>reject(new Error('This picture could not be decoded.'));img.src=src;});}
+function projectStatus(message){if($('projectStatus'))$('projectStatus').textContent=message;}
+function syncProjectUI(){
+ if(!projectCodec)return;
+ $('projectPrepare').disabled=!ready||projectPreparing||projectLoading;
+ $('projectLoad').disabled=!ready||projectCommitting;
+ $('projectSend').disabled=!preparedProject||projectPreparing||projectLoading;
+ $('projectOpenWebsite').disabled=!preparedProject||projectPreparing||projectLoading;
+ canvas.dataset.projectPrepared=String(!!preparedProject);canvas.dataset.projectLoading=String(projectLoading);
+}
+function clearProjectFiles(){
+ if(!projectCodec)return;projectGeneration++;projectPreparing=false;preparedProject=null;
+ for(const url of projectURLs)URL.revokeObjectURL(url);projectURLs=[];
+ for(const id of ['projectDownload','projectDataDownload']){$(id).hidden=true;$(id).removeAttribute('href');}
+ $('projectSummary').textContent='';syncProjectUI();
+}
+async function captureProject(suppliedMusic){
+ const file=suppliedMusic?.file||music?.getFile(),musicInfo=music?.getState();
+ if(musicInfo?.loading)throw new Error('Wait for the chosen music to finish checking, then prepare again.');
+ const project={format:'snow-globe-project',version:1,title:($('projectTitle').value||'My winter world').trim().slice(0,80)||'My winter world',createdAt:new Date().toISOString(),images:{},imageOptions:{insideOriginal,insideHasAlpha},settings:{},music:null,website:'https://74127418528426leo-del.github.io/snowball/'};
+ for(const layer of ['inside','outside','glass'])project.images[layer]={...sceneSources[layer]};
+ for(const key of projectCodec.stateKeys)project.settings[key]=state[key];
+ const volume=musicInfo?.volume??.45;
+ if(file)project.music={name:file.name||'Background music.mp3',type:file.type||'',src:suppliedMusic?.src||await audioDataURL(file),volume};
+ return projectCodec.validate(project);
+}
+function writeProjectCopy(copy,project){
+ const node=copy.querySelector('#project-data');if(node)node.textContent=projectCodec.stringify(project);
+ // The project payload owns its selected music; avoid loading a second track on startup.
+ const oldMusic=copy.querySelector('#music-data');if(oldMusic)oldMusic.textContent='null';
+ for(const id of ['musicDownload','projectDownload','projectDataDownload']){const link=copy.querySelector('#'+id);if(link){link.hidden=true;link.removeAttribute('href');}}
+ for(const id of ['downloadOriginalInside','downloadOriginalOutside','downloadOriginalGlass','downloadEnhancedInside','downloadEnhancedOutside'])copy.querySelector('#'+id)?.removeAttribute('href');
+ for(const id of ['projectSend','projectOpenWebsite']){const button=copy.querySelector('#'+id);if(button)button.disabled=true;}
+ const prepare=copy.querySelector('#projectPrepare');if(prepare)prepare.disabled=false;
+ const title=copy.querySelector('#projectTitle');if(title){title.value=project.title;title.setAttribute?.('value',project.title);}
+ const status=copy.querySelector('#projectStatus');if(status)status.textContent='Prepare a fresh snapshot to download or share this world.';
+ const summary=copy.querySelector('#projectSummary');if(summary)summary.textContent='';
+}
+function serializeProjectHTML(project){
+ const copy=document.documentElement.cloneNode(true);copy.classList.remove('pseudo-full');
+ const preview=copy.querySelector('#world'),panel=copy.querySelector('#settingsPanel');
+ preview.classList.remove('cinema','full-active');panel.classList.remove('open');
+ if(panel.parentNode===preview)preview.parentNode.insertBefore(panel,preview);
+ copy.querySelectorAll('#world canvas:not(#panorama)').forEach(element=>element.remove());
+ copy.querySelector('#musicAudio').removeAttribute('src');
+ for(const id of ['loading','helpPanel','toast','showControls']){const element=copy.querySelector('#'+id);if(element)element.hidden=id!=='loading';}
+ writeProjectCopy(copy,project);return '<!doctype html>\n'+copy.outerHTML;
+}
+function namedFile(parts,name,type){const blob=typeof File==='function'?new File(parts,name,{type}):new Blob(parts,{type});if(!blob.name)Object.defineProperty(blob,'name',{value:name});return blob;}
+async function prepareProject(){
+ if(!projectCodec||!ready||projectPreparing||projectLoading)return;
+ clearProjectFiles();const request=++projectGeneration,revision=sceneRevision;projectPreparing=true;syncProjectUI();projectStatus('Gathering your images, music and settings…');
+ try{
+  const project=await captureProject();if(request!==projectGeneration||revision!==sceneRevision)return;
+  const json=projectCodec.stringify(project),html=serializeProjectHTML(project),stem=project.title.normalize?.('NFKD').replace(/[^a-z0-9]+/gi,'_').replace(/^_+|_+$/g,'').slice(0,60)||'Snow_Globe';
+  const htmlFile=namedFile([html],stem+'.html','text/html'),dataFile=namedFile([json],stem+'.snowglobe.json','application/json');
+  if(htmlFile.size>100*1024*1024)throw new Error('This complete HTML would exceed the 100 MB project limit. Choose smaller images or a shorter music file and prepare again.');
+  if(request!==projectGeneration||revision!==sceneRevision)return;
+  for(const [id,file] of [['projectDownload',htmlFile],['projectDataDownload',dataFile]]){const url=URL.createObjectURL(file);projectURLs.push(url);$(id).href=url;$(id).download=file.name;$(id).hidden=false;}
+  preparedProject={project,htmlFile,dataFile};
+  $('projectSummary').textContent='HTML '+(htmlFile.size/1048576).toFixed(1)+' MB · Project '+(dataFile.size/1048576).toFixed(1)+' MB · '+(project.music?'Music included':'No music');
+  projectStatus('Snapshot ready. Download or share below. After making changes, choose Prepare project again.');
+ }catch(error){if(request===projectGeneration)projectStatus((error.message||'This project could not be prepared.')+' Your current world is kept.');}
+ finally{if(request===projectGeneration){projectPreparing=false;syncProjectUI();}}
+}
+let projectLoadGeneration=0,projectFileReadGeneration=0,projectCommitting=false;
+function setCommitLock(locked){
+ projectCommitting=locked;
+ for(const id of ['replaceInside','replaceOutside','restoreImages','sourceImages','musicChoose','musicExample','musicRemove'])if($(id))$(id).disabled=locked||!ready||(id==='musicRemove'&&!music?.getState().hasTrack)||(id==='sourceImages'&&!assets.originals);
+ syncProjectUI();
+}
+async function applyProject(input){
+ if(projectCommitting)throw new Error('The current project is finishing. Try loading again in a moment.');
+ const project=projectCodec.validate(input),request=++projectLoadGeneration,revision=++sceneRevision;
+ ++tokens.inside;++tokens.outside;projectLoading=true;syncProjectUI();projectStatus('Opening the saved world…');
+ const layers=['inside','outside','glass'],stagedTextures={};let stagedMusic=null,stagedMusicElement=null;
+ try{
+  const decoded=await Promise.all(layers.map(layer=>loadImage(project.images[layer].src)));
+  for(const image of decoded)if(image.width<256||image.height<64||image.width>16384||image.height>16384||image.width*image.height>64000000)throw new Error('A project image is outside the supported panorama dimensions.');
+  if(request!==projectLoadGeneration||revision!==sceneRevision)throw new Error('A newer selection replaced this loading project.');
+  let songFile=null;
+  if(project.music){
+   if(!music)throw new Error('Audio playback is unavailable in this browser.');
+   songFile=projectCodec.dataToBlob(project.music.src);Object.defineProperty(songFile,'name',{value:project.music.name});
+   stagedMusicElement=document.createElement('audio');stagedMusicElement.hidden=true;
+   let candidate;candidate=window.createGlobeMusic({element:stagedMusicElement,onStatus:info=>{if(music===candidate)syncMusicUI(info);}});stagedMusic=candidate;
+   let deadline;try{const okay=await Promise.race([stagedMusic.loadFile(songFile),new Promise((_,reject)=>{deadline=setTimeout(()=>reject(new Error('The saved music took too long to open. Try another browser or music file.')),15000);})]);if(!okay)throw new Error('This browser could not decode the saved music. The previous world is kept.');}finally{clearTimeout(deadline);}
+  }
+  if(request!==projectLoadGeneration||revision!==sceneRevision)throw new Error('A newer selection replaced this loading project.');
+  if(gl&&lost)throw new Error('Wait for the graphics display to recover, then load the project again.');
+  if(gl)for(let i=0;i<layers.length;i++)stagedTextures[layers[i]]=createTextureForImage(decoded[i]);
+  setCommitLock(true);
+  // Promote the already-decoded, quiet track without another asynchronous decode.
+  // The scene, textures and soundtrack now commit in this single JavaScript turn.
+  if(songFile){const old=music;stagedMusicElement.id='musicAudio';$('musicAudio').replaceWith(stagedMusicElement);music=stagedMusic;stagedMusic=null;old.dispose();syncMusicUI(music.getState());}else music?.clear();
+  // All decoding and GPU allocation have succeeded before the scene is replaced.
+  for(let i=0;i<layers.length;i++){const layer=layers[i];if(stagedTextures[layer]){if(textures[layer])gl.deleteTexture(textures[layer]);textures[layer]=stagedTextures[layer];delete stagedTextures[layer];}images[layer]=decoded[i];sceneSources[layer]={...project.images[layer]};}
+  insideOriginal=project.imageOptions.insideOriginal;insideHasAlpha=project.imageOptions.insideHasAlpha;
+  motion?.disable();Object.assign(state,C.createState(reduced.matches),project.settings,{motionEnabled:false,motionStatus:'off',tiltX:0,tiltY:0,shake:0,time:0,glassYaw:0});
+  if(reduced.matches)state.paused=true;C.resetRotation(state);constrainView();roomLighting.setImage(images.outside);updateRoomLight();
+  music?.setVolume(project.music?.volume??.45);$('projectTitle').value=project.title;
+  for(const [id,key,out] of [['snowAmount','snow','snowValue'],['snowVisibility','snowVisibility','visibilityValue'],['glassAmount','glass','glassValue'],['roomAmount','room','roomValue'],['lightSpill','lightSpill','lightValue']]){$(id).value=Math.round(state[key]*100);$(out).textContent=Math.round(state[key]*100)+'%';}
+  $('speed').value=state.speed;$('speedValue').textContent=state.speed.toFixed(1)+'°/s';$('quality').value=state.quality;
+  clearProjectFiles();clearExportDownload();last=0;syncUI(true);resize();
+  projectStatus('“'+project.title+'” is open. '+(project.music?'Press Play music to hear its soundtrack. ':'')+'Prepare a fresh copy to share any changes.');
+  return true;
+ }finally{
+  stagedMusic?.dispose();for(const texture of Object.values(stagedTextures))gl?.deleteTexture(texture);
+  if(request===projectLoadGeneration){projectLoading=false;setCommitLock(false);syncProjectUI();}
+ }
+}
+function readProjectText(file){if(file.size>100*1024*1024)throw new Error('Choose a project smaller than 100 MB.');if(typeof file.text==='function')return file.text();return new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(reader.result);reader.onerror=()=>reject(new Error('This project file could not be read.'));reader.readAsText(file);});}
+function initializeProjectStudio(){
+ if(!projectCodec)return;
+ $('projectPrepare').onclick=prepareProject;$('projectLoad').onclick=()=>$('projectFile').click();
+ $('projectFile').onchange=async event=>{const file=event.target.files[0];event.target.value='';if(!file||projectCommitting)return false;const request=++projectFileReadGeneration,revision=++sceneRevision;try{const text=await readProjectText(file);if(request!==projectFileReadGeneration||revision!==sceneRevision)return false;return await applyProject(projectCodec.parse(text));}catch(error){if(request===projectFileReadGeneration)projectStatus((error.message||'This project could not be opened.')+' Your current world is kept.');return false;}};
+ let handoffApplying=false;
+ transfer=window.createGlobeTransfer?.({onProject:async project=>{handoffApplying=true;try{return await applyProject(project);}finally{handoffApplying=false;}},onStatus:info=>{if(handoffApplying&&['timeout','cancelled'].includes(info.status)&&!projectCommitting){sceneRevision++;projectLoadGeneration++;projectLoading=false;syncProjectUI();}projectStatus(info.message);}});
+ $('projectSend').onclick=()=>preparedProject&&transfer?.share(preparedProject.htmlFile);
+ $('projectOpenWebsite').onclick=()=>preparedProject&&transfer?.openWebsite(preparedProject.project);
+ for(const [id,src,name] of [['downloadOriginalInside',assets.originals?.inside||assets.inside,'Original_Village.png'],['downloadOriginalOutside',assets.originals?.outside||assets.outside,'Original_Room.png'],['downloadOriginalGlass',assets.glass,'Original_Glass.png'],['downloadEnhancedInside',assets.inside,'Village_360_Transparent.webp'],['downloadEnhancedOutside',assets.outside,'Room_360.webp']]){
+  if(!$(id)||!src)continue;const link=$(id);link.download=name;
+  // A small file URL keeps original bytes and works with browser download
+  // handling without navigating to a multi-megabyte data URI.
+  try{link.href=URL.createObjectURL(projectCodec.dataToBlob(src));}
+  catch{link.href='#';link.onclick=()=>{toast('This browser could not prepare the image download. Try reopening the complete HTML in another browser.');return false;};}
+ }
+ $('projectTitle').oninput=()=>{clearProjectFiles();projectStatus('Project name changed. Prepare a fresh copy when ready.');};
+ syncProjectUI();
+}
+function imageHasAlpha(image,file){
+ if(/\.jpe?g$/i.test(file?.name||'')||file?.type==='image/jpeg')return false;
+ const tile=document.createElement('canvas');tile.width=Math.min(512,image.width);tile.height=Math.min(128,image.height);
+ const context=tile.getContext('2d',{willReadFrequently:true});if(!context)return false;
+ try{for(let y=0;y<image.height;y+=tile.height){for(let x=0;x<image.width;x+=tile.width){const w=Math.min(tile.width,image.width-x),h=Math.min(tile.height,image.height-y);context.clearRect(0,0,tile.width,tile.height);context.drawImage(image,x,y,w,h,0,0,w,h);const pixels=context.getImageData(0,0,w,h).data;for(let i=3;i<pixels.length;i+=4)if(pixels[i]<255)return true;}}}catch{return false;}return false;
+}
+function normalizeImageDataURL(src){
+ const match=/^data:([^;,]*);base64,([A-Za-z0-9+/]+={0,2})$/i.exec(src||'');
+ if(!match)throw new Error('This image could not be stored as a portable picture.');
+ let type=match[1].toLowerCase();if(type==='image/jpg')type='image/jpeg';if(type==='image/x-png')type='image/png';
+ if(!['image/png','image/jpeg','image/webp'].includes(type)){
+  if(type&&!['application/octet-stream','binary/octet-stream'].includes(type))throw new Error('Choose an actual PNG, JPEG or WebP image.');
+  const signature=atob(match[2].slice(0,32));
+  if(signature.startsWith('\x89PNG\r\n\x1a\n'))type='image/png';
+  else if(signature.startsWith('\xff\xd8\xff'))type='image/jpeg';
+  else if(signature.startsWith('RIFF')&&signature.slice(8,12)==='WEBP')type='image/webp';
+  else throw new Error('This picture has no recognizable PNG, JPEG or WebP format.');
+ }
+ return 'data:'+type+';base64,'+match[2];
+}
+for(const layer of ['inside','outside']){
+ $('replace'+(layer==='inside'?'Inside':'Outside')).onclick=()=>$(layer+'File').click();
+ $(layer+'File').onchange=async e=>{
+  const file=e.target.files[0];e.target.value='';if(!file)return;
+  if(projectCommitting)return false;
+  const token=++tokens[layer];sceneRevision++;if(!/\.(png|jpe?g|webp)$/i.test(file.name)||file.size>25*1024*1024){toast('Choose a JPG, PNG or WebP smaller than 25 MB.');return;}
+  const url=URL.createObjectURL(file);
+  try{const [img,raw]=await Promise.all([loadImage(url),projectCodec?audioDataURL(file):Promise.resolve(null)]);if(token!==tokens[layer])return;const src=projectCodec?normalizeImageDataURL(raw):null;if(img.width<256||img.height<64)throw new Error('Choose a larger panoramic image (at least 256 × 64 pixels).');if(img.width>16384||img.height>16384||img.width*img.height>64000000)throw new Error('Choose a panorama no larger than 64 megapixels or 16,384 pixels per side.');const hasAlpha=layer==='inside'?imageHasAlpha(img,file):false;if(token!==tokens[layer])return;if(gl&&!lost)uploadTexture(layer,img);images[layer]=img;if(src)sceneSources[layer]={name:file.name,type:/^data:([^;,]+)/.exec(src)?.[1]||file.type||'image/png',src};if(layer==='inside'){insideOriginal=false;insideHasAlpha=hasAlpha;constrainView();state.snowYaw=0;}else roomLighting.setImage(img);C.setAngle(state,layer,0);clearProjectFiles();clearExportDownload();syncUI(true);requestRender();toast((layer==='inside'?'Village':'Room')+' image changed. The glass stays separate.');}
+  catch(err){if(token===tokens[layer])toast(err.message+' The previous picture is kept.');}
+  finally{URL.revokeObjectURL(url);}
+ };
+}
+async function applyScenery(source,message){
+ if(!source||projectCommitting)return;sceneRevision++;const current={inside:++tokens.inside,outside:++tokens.outside};
+ try{const [a,b]=await Promise.all([loadImage(source.inside),loadImage(source.outside)]);let changed=false;
+  if(current.inside===tokens.inside){if(gl&&!lost)uploadTexture('inside',a);images.inside=a;sceneSources.inside={name:'village panorama.'+(/^data:image\/webp/i.test(source.inside)?'webp':'png'),type:/^data:([^;,]+)/.exec(source.inside)?.[1]||'image/png',src:source.inside};insideOriginal=source.insideOriginal!==false;insideHasAlpha=!!source.insideHasAlpha;constrainView();changed=true;}
+  if(current.outside===tokens.outside){if(gl&&!lost)uploadTexture('outside',b);images.outside=b;sceneSources.outside={name:'room panorama.'+(/^data:image\/webp/i.test(source.outside)?'webp':'png'),type:/^data:([^;,]+)/.exec(source.outside)?.[1]||'image/png',src:source.outside};roomLighting.setImage(b);changed=true;}
+  if(changed){clearProjectFiles();clearExportDownload();syncUI();requestRender();toast(message);}
+ }catch{if(current.inside===tokens.inside||current.outside===tokens.outside)toast('Unable to restore the scenery. The current images are kept.');}
+}
+$('restoreImages').onclick=()=>applyScenery(assets,'Enhanced scenery restored.');
+$('sourceImages').onclick=()=>applyScenery(assets.originals,'Original panoramas selected.');
+canvas.addEventListener('webglcontextlost',e=>{if(canvas.dataset.renderer!=='webgl')return;e.preventDefault();lost=true;ready=false;canvas.dataset.ready='false';motion?.setPaused(true);syncMotionUI();if(raf)cancelAnimationFrame(raf);raf=0;$('loading').hidden=false;$('loadingTitle').textContent='Restoring the glass…';$('loadingText').textContent='Your scenery and settings are preserved.';});
+canvas.addEventListener('webglcontextrestored',()=>{try{setupGL();lost=false;ready=true;canvas.dataset.ready='true';$('loading').hidden=true;last=0;syncUI();resize();}catch{$('loadingTitle').textContent='Please reopen this file';$('loadingText').textContent='The browser could not restore its graphics display.';}});
+document.addEventListener('visibilitychange',()=>{motion?.setPaused(!ready||lost||state.paused||document.hidden);if(document.hidden){if(raf)cancelAnimationFrame(raf);raf=0;}else{last=0;requestRender();}});
+if(reduced.addEventListener)reduced.addEventListener('change',e=>{if(e.matches){state.paused=true;state.autoOutside=false;syncUI();requestRender();}});
+window.addEventListener('resize',resize);if(window.ResizeObserver)new ResizeObserver(resize).observe(world);
+window.SnowGlobe=Object.freeze({snapshot:()=>({...state,music:music?.getState()||null,globe:params().globe,roomAnchor:params().roomAnchor,roomLight:{color:[...roomLight.color],direction:[...roomLight.direction],strength:roomLight.strength},effectiveSnow:C.effectiveSnow(state),ready,renderer:canvas.dataset.renderer,width:canvas.width,height:canvas.height,frameCount,renderMs:lastRenderMs,insideOriginal,insideHasAlpha,images:{inside:[images.inside?.width,images.inside?.height],outside:[images.outside?.width,images.outside?.height]}})});
+(async()=>{
+ try{const values=await Promise.all(['inside','outside','glass'].map(name=>loadImage(assets[name])));['inside','outside','glass'].forEach((name,i)=>images[name]=values[i]);roomLighting.setImage(images.outside);updateRoomLight();
+  try{setupGL();}catch(error){
+   console.warn('Using compatibility display:',error.message);
+   // Keep the input canvas and its event handlers if a GPU context was
+   // created before failing; draw the compatibility scene on a clear overlay.
+   let surface=canvas;
+   if(gl){compatCanvas=document.createElement('canvas');compatCanvas.setAttribute('aria-hidden','true');compatCanvas.style.pointerEvents='none';world.appendChild(compatCanvas);surface=compatCanvas;gl=null;}
+   compatibility=window.createCompatibilityRenderer(surface,images,()=>({...state,...params(),visibility:state.snowVisibility,snow:C.effectiveSnow(state),tilt:{x:state.tiltX,y:state.tiltY},roomLight,insideOriginal,insideHasAlpha}));canvas.dataset.renderer='canvas2d';$('rendererNote').textContent='Compatibility display is active: a curved-glass approximation with projected snow. WebGL adds refracted reflections and finer depth-based snow.';setStatus('COMPATIBILITY DISPLAY');
+  }
+  state.fov=defaultFov(state.mode);state.pitch=defaultPitch(state.mode);ready=true;canvas.dataset.ready='true';for(const id of ['replaceInside','replaceOutside','restoreImages','sourceImages'])$(id).disabled=id==='sourceImages'&&!assets.originals;
+  if(projectCodec){initializeProjectStudio();try{const embedded=JSON.parse($('project-data')?.textContent||'null');if(embedded)await applyProject(embedded);}catch(error){projectStatus((error.message||'The embedded project could not be opened.')+' The built-in world is available.');}}
+  $('loading').hidden=true;syncUI(true);resize();
+ }catch(error){$('loadingTitle').textContent='Unable to open this snow globe';$('loadingText').textContent=error.message+' Download the complete HTML and try again.';}
+})();
+})();
+</script>
+</body>
+</html>
